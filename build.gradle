@@ -1,0 +1,151 @@
+class Config {
+	String datasetName, hdfsPathInp, hdfsPathOut, localPathOut, delimiter, minSupport, minConfidence, maxPasses, filterFlag
+}
+class GlobalParams {
+	String countTxns
+}
+
+def config = new Config()
+def params = new GlobalParams()
+
+repositories {
+	mavenCentral()
+}
+
+apply plugin: 'java'
+
+dependencies {
+	compile 'org.apache.hadoop:hadoop-common:2.7.3'
+	compile 'org.apache.hadoop:hadoop-mapreduce-client-core:2.7.3'
+	compile 'org.apache.hadoop:hadoop-core:1.2.1'
+}
+
+sourceSets {
+	main.java.srcDir 'src/main'
+}
+
+jar {
+	from configurations.compile.collect {
+		zipTree it
+	}
+	manifest.attributes 'Main-Class': 'com.pranit.mba.MbaDriver'
+	baseName 'mba'
+}
+
+task readConfig
+task countTransactions(type: Exec, dependsOn: readConfig)
+task deleteInpDirHdfs(type: Exec)
+task copyInputToHdfs(type: Exec, dependsOn: deleteInpDirHdfs)
+task deleteOutDirHdfs(type: Exec)
+task runJar(type: Exec, dependsOn: deleteOutDirHdfs)
+task deleteOutDirLocal(type: Delete)
+task copyOutputFromHdfs(type: Exec, dependsOn: deleteOutDirLocal)
+
+
+task run {
+	group 'Run tasks'
+	description 'Automates the entire process of running this project.'
+	
+	dependsOn = [readConfig, countTransactions, deleteInpDirHdfs, copyInputToHdfs, deleteOutDirHdfs, runJar, deleteOutDirLocal, copyOutputFromHdfs]
+	countTransactions.mustRunAfter readConfig
+	deleteInpDirHdfs.mustRunAfter countTransactions
+	copyInputToHdfs.mustRunAfter deleteInpDirHdfs
+	deleteOutDirHdfs.mustRunAfter copyInputToHdfs
+	runJar.mustRunAfter deleteOutDirHdfs
+	deleteOutDirLocal.mustRunAfter runJar
+	copyOutputFromHdfs.mustRunAfter deleteOutDirLocal
+}
+
+readConfig {
+	outputs.upToDateWhen { false }
+	doFirst {
+		File conf = new File('./config')
+		if (!conf.exists()) {
+			logger.lifecycle("\nFile does not exist! Create a config file first\n")
+		}
+		else {
+			logger.lifecycle("\nConfig File exists. Reading parameters from the file\n")
+			def list = []
+			conf.eachLine { line ->
+				if (line.trim() && !line.startsWith("#")) {
+					list.add(line.trim())
+				}
+			}
+			
+			config.datasetName = list[0]
+			config.hdfsPathInp = list[1]
+			config.hdfsPathOut = list[2]
+			config.localPathOut = list[3]
+			config.delimiter = list[4]
+			config.minSupport = list[5]
+			config.minConfidence = list[6]
+			config.maxPasses = list[7]
+			config.filterFlag = list[8]
+		}
+	}
+}
+
+countTransactions {
+	def pattern = ".*"
+	outputs.upToDateWhen { false }
+	doFirst {
+		logger.lifecycle("\nCounting total number of transactions in the dataset\n")
+		executable 'grep'
+		args '-c', pattern, "./dataset/$config.datasetName"
+		standardOutput = new ByteArrayOutputStream()
+	}
+	doLast {
+		params.countTxns = standardOutput.toString().tokenize('\n')[0]
+	}
+}
+
+deleteInpDirHdfs {
+	outputs.upToDateWhen { false }
+	doFirst {
+		logger.lifecycle("\nDeleting input directory in HDFS\n")
+		executable 'hdfs'
+		args 'dfs', '-rm', '-r', "$config.hdfsPathInp"
+		ignoreExitValue true
+	}
+}
+copyInputToHdfs {
+	outputs.upToDateWhen { false }
+	doFirst {
+		logger.lifecycle("\nCopying dataset from local File System to HDFS\n")
+		executable 'hdfs'
+		args 'dfs', '-put', "./dataset/$config.datasetName", "$config.hdfsPathInp"
+	}
+}
+
+deleteOutDirHdfs {
+	outputs.upToDateWhen { false }
+	doFirst {
+		logger.lifecycle("\nDeleting output directory in HDFS\n")
+		executable 'hdfs'
+		args 'dfs', '-rm', '-r', "$config.hdfsPathOut"
+		ignoreExitValue true
+	}
+}
+runJar {
+	doFirst {
+		logger.lifecycle("\nRunning the MapReduce program in HDFS by executing the jar file\n")
+		executable 'hadoop'
+		args 'jar', './build/libs/mba.jar', "$config.hdfsPathInp", "$config.hdfsPathOut", "$config.minSupport", "$config.minConfidence", "$params.countTxns", "$config.delimiter", "$config.maxPasses", "$config.filterFlag"
+	}
+}
+
+deleteOutDirLocal {
+	outputs.upToDateWhen { false }
+	doFirst {
+		logger.lifecycle("\nDeleting output directory in Local file system\n")
+		delete "$config.localPathOut/mba_output"
+	}
+}
+copyOutputFromHdfs {
+	outputs.upToDateWhen { false }
+	doFirst {
+		logger.lifecycle("\nCopying output directory from HDFS to local File System\n")
+		executable 'hdfs'
+		args 'dfs', '-get', "$config.hdfsPathOut", "$config.localPathOut/mba_output"
+	}
+}
